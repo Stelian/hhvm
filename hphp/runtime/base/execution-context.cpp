@@ -45,6 +45,7 @@
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/base/unit-cache.h"
+#include "hphp/runtime/ext/ext_system_profiler.h"
 #include "hphp/runtime/ext/std/ext_std_output.h"
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
@@ -714,6 +715,10 @@ void ExecutionContext::handleError(const std::string& msg,
     recordLastError(ee, errnum);
   }
 
+  if (g_system_profiler) {
+    g_system_profiler->errorCallBack(ee, errnum, msg);
+  }
+
   if (mode == ErrorThrowMode::Always ||
       (mode == ErrorThrowMode::IfUnhandled && !handled)) {
     DEBUGGER_ATTACHED_ONLY(phpDebuggerErrorHook(ee, errnum, msg));
@@ -724,12 +729,13 @@ void ExecutionContext::handleError(const std::string& msg,
     throw exn;
   }
   if (!handled) {
-    if (ThreadInfo::s_threadInfo->m_reqInjectionData.hasTrackErrors()) {
+    VMRegAnchor _;
+    auto fp = vmfp();
+
+    if (ThreadInfo::s_threadInfo->m_reqInjectionData.hasTrackErrors() && fp) {
       // Set $php_errormsg in the parent scope
       Variant varFrom(ee.getMessage());
       const auto tvFrom(varFrom.asTypedValue());
-      VMRegAnchor _;
-      auto fp = vmfp();
       if (fp->func()->isBuiltin()) {
         fp = getPrevVMStateUNSAFE(fp);
       }

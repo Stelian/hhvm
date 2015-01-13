@@ -193,12 +193,13 @@ void verifyTypeImpl(HTS& env, int32_t const id) {
     auto const isInstance = haveBit
       ? gen(env, InstanceOfBitmask, objClass, cns(env, clsName))
       : gen(env, ExtendsClass, objClass, constraint);
-    env.irb->ifThen(
-      [&](Block* taken) {
+    ifThen(
+      env,
+      [&] (Block* taken) {
         gen(env, JmpZero, taken, isInstance);
       },
       [&] { // taken: the param type does not match
-        env.irb->hint(Block::Hint::Unlikely);
+        hint(env, Block::Hint::Unlikely);
         if (isReturnType) {
           gen(env, VerifyRetFail, val);
         } else {
@@ -313,7 +314,7 @@ folly::Optional<Type> ratToAssertType(HTS& env, RepoAuthType rat) {
     }
 
   case T::Cell:       return Type::Cell;
-  case T::Ref:        return Type::BoxedCell;
+  case T::Ref:        return Type::BoxedInitCell;
 
   case T::InitGen:
     // Should ideally be able to remove Uninit here.

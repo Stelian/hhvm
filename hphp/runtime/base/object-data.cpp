@@ -103,18 +103,15 @@ bool ObjectData::destruct() {
       // prevent the refcount from going to zero when the destructor returns.
       CountableHelper h(this);
       RefCount c = this->getCount();
-      TypedValue retval;
-      tvWriteNull(&retval);
       try {
         // Call the destructor method
-        g_context->invokeFuncFew(&retval, meth, this);
+        g_context->invokeMethodV(this, meth);
       } catch (...) {
         // Swallow any exceptions that escape the __destruct method
         handle_destructor_exception();
       }
-      tvRefcountedDecRef(&retval);
 
-      return (c == this->getCount());
+      return c == this->getCount();
     }
   }
   return true;
@@ -927,15 +924,11 @@ ObjectData* ObjectData::clone() {
 
 Variant ObjectData::offsetGet(Variant key) {
   assert(instanceof(SystemLib::s_ArrayAccessClass));
-  const Func* method = m_cls->lookupMethod(s_offsetGet.get());
+
+  auto const method = m_cls->lookupMethod(s_offsetGet.get());
   assert(method);
-  if (!method) {
-    return uninit_null();
-  }
-  Variant v;
-  g_context->invokeFuncFew(v.asTypedValue(), method,
-                             this, nullptr, 1, key.asCell());
-  return v;
+
+  return g_context->invokeMethodV(this, method, InvokeArgs(key.asCell(), 1));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -980,17 +973,17 @@ const TypedValue* ObjectData::propVec() const {
  * Only call this if cls->callsCustomInstanceInit() is true
  */
 ObjectData* ObjectData::callCustomInstanceInit() {
-  const Func* init = m_cls->lookupMethod(s___init__.get());
+  auto const init = m_cls->lookupMethod(s___init__.get());
   assert(init);
-  TypedValue tv;
-  // We need to incRef/decRef here because we're still a new (m_count
-  // == 0) object and invokeFunc is going to expect us to have a
-  // reasonable refcount.
+
+  // We need to incRef/decRef here because we're still a new (m_count == 0)
+  // object and invokeMethod is going to expect us to have a reasonable
+  // refcount.
   try {
     incRefCount();
-    g_context->invokeFuncFew(&tv, init, this);
-    decRefCount();
+    DEBUG_ONLY auto const tv = g_context->invokeMethod(this, init);
     assert(!IS_REFCOUNTED_TYPE(tv.m_type));
+    decRefCount();
   } catch (...) {
     this->setNoDestruct();
     decRefObj(this);
@@ -1237,7 +1230,7 @@ struct MagicInvoker {
     TypedValue args[1] = {
       make_tv<KindOfString>(const_cast<StringData*>(info.key))
     };
-    g_context->invokeFuncFew(retval, meth, info.obj, nullptr, 1, args);
+    *retval = g_context->invokeMethod(info.obj, meth, folly::range(args));
   }
 };
 
@@ -1256,7 +1249,7 @@ bool ObjectData::invokeSet(TypedValue* retval, const StringData* key,
         make_tv<KindOfString>(const_cast<StringData*>(key)),
         *tvToCell(val)
       };
-      g_context->invokeFuncFew(retval, meth, this, nullptr, 2, args);
+      *retval = g_context->invokeMethod(this, meth, folly::range(args));
     }
   );
 }
@@ -1420,7 +1413,7 @@ void ObjectData::propWD(TypedValue*& retval, TypedValue& tvRef,
   propImpl<true, true>(retval, tvRef, ctx, key);
 }
 
-bool ObjectData::propIsset(Class* ctx, const StringData* key) {
+bool ObjectData::propIsset(const Class* ctx, const StringData* key) {
   auto const lookup = getProp(ctx, key);
   auto const prop = lookup.prop;
 
@@ -1441,7 +1434,7 @@ bool ObjectData::propIsset(Class* ctx, const StringData* key) {
   return tv.m_data.num;
 }
 
-bool ObjectData::propEmptyImpl(Class* ctx, const StringData* key) {
+bool ObjectData::propEmptyImpl(const Class* ctx, const StringData* key) {
   auto const lookup = getProp(ctx, key);
   auto const prop = lookup.prop;
 
@@ -1479,7 +1472,7 @@ bool ObjectData::propEmptyImpl(Class* ctx, const StringData* key) {
   return false;
 }
 
-bool ObjectData::propEmpty(Class* ctx, const StringData* key) {
+bool ObjectData::propEmpty(const Class* ctx, const StringData* key) {
   if (UNLIKELY(getAttribute(HasPropEmpty))) {
     if (instanceof(c_SimpleXMLElement::classof())) {
       return c_SimpleXMLElement::PropEmpty(this, key);
@@ -1654,13 +1647,16 @@ TypedValue* ObjectData::setOpProp(TypedValue& tvRef,
 }
 
 template <bool setResult>
-void ObjectData::incDecProp(TypedValue& tvRef,
-                            Class* ctx,
-                            IncDecOp op,
-                            const StringData* key,
-                            TypedValue& dest) {
+void ObjectData::incDecProp(
+  Class* ctx,
+  IncDecOp op,
+  const StringData* key,
+  TypedValue& dest
+) {
   auto const lookup = getProp(ctx, key);
   auto prop = lookup.prop;
+
+  auto tv = make_tv<KindOfUninit>();
 
   if (prop && lookup.accessible) {
     auto tvResult = make_tv<KindOfNull>();
@@ -1691,11 +1687,11 @@ void ObjectData::incDecProp(TypedValue& tvRef,
 
   // Native accessors.
   if (getAttribute(HasNativePropHandler)) {
-    if (invokeNativeGetProp(&tvRef, key)) {
-      tvUnboxIfNeeded(&tvRef);
-      IncDecBody<setResult>(op, &tvRef, &dest);
+    if (invokeNativeGetProp(&tv, key)) {
+      tvUnboxIfNeeded(&tv);
+      IncDecBody<setResult>(op, &tv, &dest);
       TypedValue ignored;
-      if (invokeNativeSetProp(&ignored, key, &tvRef)) {
+      if (invokeNativeSetProp(&ignored, key, &tv)) {
         tvRefcountedDecRef(&ignored);
         return;
       }
@@ -1726,11 +1722,11 @@ void ObjectData::incDecProp(TypedValue& tvRef,
   }
 
   if (useGet && useSet) {
-    if (invokeGet(&tvRef, key)) {
-      tvUnboxIfNeeded(&tvRef);
-      IncDecBody<setResult>(op, &tvRef, &dest);
+    if (invokeGet(&tv, key)) {
+      tvUnboxIfNeeded(&tv);
+      IncDecBody<setResult>(op, &tv, &dest);
       TypedValue ignored;
-      if (invokeSet(&ignored, key, &tvRef)) {
+      if (invokeSet(&ignored, key, &tv)) {
         tvRefcountedDecRef(&ignored);
       }
       return;
@@ -1749,13 +1745,11 @@ void ObjectData::incDecProp(TypedValue& tvRef,
   IncDecBody<setResult>(op, prop, &dest);
 }
 
-template void ObjectData::incDecProp<true>(TypedValue&,
-                                           Class*,
+template void ObjectData::incDecProp<true>(Class*,
                                            IncDecOp,
                                            const StringData*,
                                            TypedValue&);
-template void ObjectData::incDecProp<false>(TypedValue&,
-                                            Class*,
+template void ObjectData::incDecProp<false>(Class*,
                                             IncDecOp,
                                             const StringData*,
                                             TypedValue&);
@@ -1871,37 +1865,21 @@ void ObjectData::getTraitProps(const Class* klass, bool pubOnly,
   }
 }
 
+static Variant invokeSimple(ObjectData* obj, const StaticString& name) {
+  auto const meth = obj->methodNamed(name.get());
+  return meth ? g_context->invokeMethodV(obj, meth) : uninit_null();
+}
+
 Variant ObjectData::invokeSleep() {
-  const Func* method = m_cls->lookupMethod(s___sleep.get());
-  if (method) {
-    TypedValue tv;
-    g_context->invokeFuncFew(&tv, method, this);
-    return tvAsVariant(&tv);
-  } else {
-    return uninit_null();
-  }
+  return invokeSimple(this, s___sleep);
 }
 
 Variant ObjectData::invokeToDebugDisplay() {
-  const Func* method = m_cls->lookupMethod(s___toDebugDisplay.get());
-  if (method) {
-    TypedValue tv;
-    g_context->invokeFuncFew(&tv, method, this);
-    return tvAsVariant(&tv);
-  } else {
-    return uninit_null();
-  }
+  return invokeSimple(this, s___toDebugDisplay);
 }
 
 Variant ObjectData::invokeWakeup() {
-  const Func* method = m_cls->lookupMethod(s___wakeup.get());
-  if (method) {
-    TypedValue tv;
-    g_context->invokeFuncFew(&tv, method, this);
-    return tvAsVariant(&tv);
-  } else {
-    return uninit_null();
-  }
+  return invokeSimple(this, s___wakeup);
 }
 
 String ObjectData::invokeToString() {
@@ -1917,8 +1895,7 @@ String ObjectData::invokeToString() {
     // we return the empty string.
     return empty_string();
   }
-  TypedValue tv;
-  g_context->invokeFuncFew(&tv, method, this);
+  auto const tv = g_context->invokeMethod(this, method);
   if (!IS_STRING_TYPE(tv.m_type)) {
     // Discard the value returned by the __toString() method and raise
     // a recoverable error
@@ -2005,10 +1982,7 @@ ObjectData* ObjectData::cloneImpl() {
   if (!method && getAttribute(IsCppBuiltin)) return o.detach();
   assert(method);
 
-  TypedValue tv;
-  tvWriteNull(&tv);
-  g_context->invokeFuncFew(&tv, method, obj);
-  tvRefcountedDecRef(&tv);
+  g_context->invokeMethodV(obj, method);
 
   return o.detach();
 }

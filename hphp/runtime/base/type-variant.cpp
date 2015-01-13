@@ -987,20 +987,11 @@ void Variant::unserialize(VariableUnserializer *uns,
   case 'L':
     {
       int64_t id = uns->readInt();
-      sep = uns->readChar();
-      if (sep != ':') {
-        throw Exception("Expected ':' but got '%c'", sep);
-      }
+      uns->expectChar(':');
       String rsrcName;
       rsrcName.unserialize(uns);
-      sep = uns->readChar();
-      if (sep != '{') {
-        throw Exception("Expected '{' but got '%c'", sep);
-      }
-      sep = uns->readChar();
-      if (sep != '}') {
-        throw Exception("Expected '}' but got '%c'", sep);
-      }
+      uns->expectChar('{');
+      uns->expectChar('}');
       DummyResource* rsrc = newres<DummyResource>();
       rsrc->o_setResourceId(id);
       rsrc->m_class_name = rsrcName;
@@ -1015,19 +1006,10 @@ void Variant::unserialize(VariableUnserializer *uns,
       String clsName;
       clsName.unserialize(uns);
 
-      sep = uns->readChar();
-      if (sep != ':') {
-        throw Exception("Expected ':' but got '%c'", sep);
-      }
+      uns->expectChar(':');
       int64_t size = uns->readInt();
-      char sep = uns->readChar();
-      if (sep != ':') {
-        throw Exception("Expected ':' but got '%c'", sep);
-      }
-      sep = uns->readChar();
-      if (sep != '{') {
-        throw Exception("Expected '{' but got '%c'", sep);
-      }
+      uns->expectChar(':');
+      uns->expectChar('{');
 
       const bool allowObjectFormatForCollections = true;
 
@@ -1098,14 +1080,8 @@ void Variant::unserialize(VariableUnserializer *uns,
         if (type == 'O') {
           // Collections are not allowed
           if (obj->isCollection()) {
-            if (size > 0) {
-              throw Exception("%s does not support the 'O' serialization "
-                              "format", clsName.data());
-            }
-            // Be lax and tolerate the 'O' serialization format for collection
-            // classes if there are 0 properties.
-            raise_warning("%s does not support the 'O' serialization "
-                          "format", clsName.data());
+            throw Exception("%s does not support the 'O' serialization "
+                            "format", clsName.data());
           }
 
           Variant serializedNativeData = init_null();
@@ -1171,10 +1147,7 @@ void Variant::unserialize(VariableUnserializer *uns,
           collectionUnserialize(obj.get(), uns, size, type);
         }
       }
-      sep = uns->readChar();
-      if (sep != '}') {
-        throw Exception("Expected '}' but got '%c'", sep);
-      }
+      uns->expectChar('}');
 
       if (uns->type() != VariableUnserializer::Type::DebuggerSerialize ||
           (cls && cls->instanceCtor() && cls->isCppSerializable())) {
@@ -1196,10 +1169,7 @@ void Variant::unserialize(VariableUnserializer *uns,
       String clsName;
       clsName.unserialize(uns);
 
-      sep = uns->readChar();
-      if (sep != ':') {
-        throw Exception("Expected ':' but got '%c'", sep);
-      }
+      uns->expectChar(':');
       String serialized;
       serialized.unserialize(uns, '{', '}');
 
@@ -1232,10 +1202,7 @@ void Variant::unserialize(VariableUnserializer *uns,
   default:
     throw Exception("Unknown type '%c'", type);
   }
-  sep = uns->readChar();
-  if (sep != ';') {
-    throw Exception("Expected ';' but got '%c'", sep);
-  }
+  uns->expectChar(';');
 }
 
 VarNR::VarNR(const String& v) {

@@ -727,18 +727,6 @@
             "value": "\n\r\t\u000b\u0000 "
         },
         {
-            "name": "HPHP_VERSION",
-            "value": "3.5.0-dev"
-        },
-        {
-            "name": "HHVM_VERSION",
-            "value": "3.5.0-dev"
-        },
-        {
-            "name": "HHVM_VERSION_ID",
-            "value": 30500
-        },
-        {
             "name": "HTML_ENTITIES",
             "value": 1
         },
@@ -1221,6 +1209,10 @@
         {
             "name": "LDAP_OPT_MATCHED_DN",
             "value": 51
+        },
+        {
+            "name": "LDAP_OPT_NETWORK_TIMEOUT",
+            "value": 20485
         },
         {
             "name": "LDAP_OPT_PROTOCOL_VERSION",

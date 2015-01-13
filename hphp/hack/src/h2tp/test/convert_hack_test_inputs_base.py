@@ -224,6 +224,8 @@ UNSUPPORTED_FILES_CONVERTER = {
         'asyncgen6.php',
         'asyncgen7.php',
         'asyncgen8.php',
+        'async_immediate.php',
+        'async_immediate_bad.php',
         'async_lambda.php',
         'async_lambda2.php',
         'async_lambda3.php',
@@ -356,6 +358,7 @@ INTERNAL_ERRORS = {
 
 OTHER_UNPARSEABLE_FILES = [
     'capitalization2.php',
+    'capitalization4.php',
     'class_abstract_final_1.php',
     'class_abstract_final_3.php',
     'class_abstract_final_10.php',

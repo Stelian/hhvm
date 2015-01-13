@@ -27,6 +27,9 @@
 #include "hphp/util/text-util.h"
 #include "hphp/util/trace.h"
 #include "hphp/runtime/base/repo-auth-type-array.h"
+#include "hphp/runtime/base/shape.h"
+#include "hphp/runtime/base/struct-array.h"
+#include "hphp/runtime/base/struct-array-defs.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/print.h"
@@ -304,6 +307,9 @@ std::string Type::toString() const {
       }
       if (auto ty = getArrayType()) {
         str += folly::to<std::string>(':', show(*ty));
+      }
+      if (const auto shape = getArrayShape()) {
+        str += folly::to<std::string>(":", show(*shape));
       }
       parts.push_back(str);
       t -= AnyArr;
@@ -907,6 +913,10 @@ Type liveTVType(const TypedValue* tv) {
     return Type::Obj.specializeExact(cls);
   }
   if (tv->m_type == KindOfArray) {
+    ArrayData* ar = tv->m_data.parr;
+    if (ar->kind() == ArrayData::kStructKind) {
+      return Type::Arr.specialize(StructArray::asStructArray(ar)->shape());
+    }
     return Type::Arr.specialize(tv->m_data.parr->kind());
   }
 
@@ -939,7 +949,7 @@ Type Type::relaxToGuardable() const {
 namespace {
 
 Type setElemReturn(const IRInstruction* inst) {
-  assert(inst->op() == SetElem || inst->op() == SetElemStk);
+  assert(inst->op() == SetElem);
   auto baseType = inst->src(minstrBaseIdx(inst->op()))->type().strip();
 
   // If the base is a Str, the result will always be a CountedStr (or
@@ -964,18 +974,6 @@ Type builtinReturn(const IRInstruction* inst) {
     return t | Type::InitNull;
   }
   not_reached();
-}
-
-Type stkReturn(const IRInstruction* inst, int dstId,
-               std::function<Type()> inner) {
-  assert(inst->modifiesStack());
-  if (dstId == 0 && inst->hasMainDst()) {
-    // Return the type of the main dest (if one exists) as dst 0
-    return inner();
-  }
-  // The instruction modifies the stack and this isn't the main dest,
-  // so it's a StkPtr.
-  return Type::StkPtr;
 }
 
 Type thisReturn(const IRInstruction* inst) {
@@ -1010,7 +1008,7 @@ Type allocObjReturn(const IRInstruction* inst) {
 }
 
 Type arrElemReturn(const IRInstruction* inst) {
-  assert(inst->op() == LdPackedArrayElem);
+  assert(inst->op() == LdPackedArrayElem || inst->op() == LdStructArrayElem);
   auto const tyParam = inst->hasTypeParam() ? inst->typeParam() : Type::Gen;
   assert(!inst->hasTypeParam() || inst->typeParam() <= Type::Gen);
 
@@ -1041,7 +1039,9 @@ Type unboxPtr(Type t) {
 }
 
 Type boxPtr(Type t) {
-  return t.deref().unbox().box().ptr(remove_ref(t.ptrKind()));
+  auto const rawBoxed = t.deref().unbox().box();
+  auto const noNull = rawBoxed - Type::BoxedUninit;
+  return noNull.ptr(remove_ref(t.ptrKind()));
 }
 
 }
@@ -1104,7 +1104,7 @@ Type convertToType(RepoAuthType ty) {
   case T::Obj:            return Type::Obj;
 
   case T::Cell:           return Type::Cell;
-  case T::Ref:            return Type::BoxedCell;
+  case T::Ref:            return Type::BoxedInitCell;
   case T::InitUnc:        return Type::UncountedInit;
   case T::Unc:            return Type::Uncounted;
   case T::InitCell:       return Type::InitCell;
@@ -1184,8 +1184,6 @@ Type outputType(const IRInstruction* inst, int dstId) {
 #define DArrPacked      return Type::Arr.specialize(ArrayData::kPackedKind);
 #define DThis           return thisReturn(inst);
 #define DMulti          return Type::Bottom;
-#define DStk(in)        return stkReturn(inst, dstId, \
-                                   [&]() -> Type { in not_reached(); });
 #define DSetElem        return setElemReturn(inst);
 #define ND              assert(0 && "outputType requires HasDest or NaryDest");
 #define DBuiltin        return builtinReturn(inst);
@@ -1216,7 +1214,6 @@ Type outputType(const IRInstruction* inst, int dstId) {
 #undef DArrPacked
 #undef DThis
 #undef DMulti
-#undef DStk
 #undef DSetElem
 #undef ND
 #undef DBuiltin
@@ -1393,7 +1390,6 @@ bool checkOperandTypes(const IRInstruction* inst, const IRUnit* unit) {
 #define SVar(...)     checkVariadic(buildUnion(__VA_ARGS__));
 #define ND
 #define DMulti
-#define DStk(...)
 #define DSetElem
 #define D(...)
 #define DBuiltin
@@ -1439,7 +1435,6 @@ bool checkOperandTypes(const IRInstruction* inst, const IRUnit* unit) {
 #undef DBuiltin
 #undef DSubtract
 #undef DMulti
-#undef DStk
 #undef DSetElem
 #undef DBox
 #undef DofS
@@ -1463,6 +1458,7 @@ std::string TypeConstraint::toString() const {
 
   if (category == DataTypeSpecialized) {
     if (wantArrayKind()) ret += ",ArrayKind";
+    if (wantArrayShape()) ret += ",ArrayShape";
     if (wantClass()) {
       folly::toAppend("Cls:", desiredClass()->name()->data(), &ret);
     }

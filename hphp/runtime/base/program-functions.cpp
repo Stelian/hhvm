@@ -128,7 +128,6 @@ void timezone_init();
 
 void pcre_init();
 void pcre_reinit();
-void pcre_session_exit();
 
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
@@ -695,7 +694,10 @@ void execute_command_line_end(int xhprof, bool coverage, const char *program) {
   }
 
   if (xhprof) {
-    HHVM_FN(var_dump)(HHVM_FN(json_encode)(f_xhprof_disable()));
+    Variant profileData = f_xhprof_disable();
+    if (!profileData.isNull()) {
+      HHVM_FN(var_dump)(HHVM_FN(json_encode)(f_xhprof_disable()));
+    }
   }
   g_context->onShutdownPostSend();
   Eval::Debugger::InterruptPSPEnded(program);
@@ -843,7 +845,7 @@ static void set_execution_mode(string mode) {
   }
 }
 
-static int start_server(const std::string &username) {
+static int start_server(const std::string &username, int xhprof) {
   // Before we start the webserver, make sure the entire
   // binary is paged into memory.
   pagein_self();
@@ -871,6 +873,10 @@ static int start_server(const std::string &username) {
   // Create the HttpServer before any warmup requests to properly
   // initialize the process
   HttpServer::Server = std::make_shared<HttpServer>();
+
+  if (xhprof) {
+    f_xhprof_enable(xhprof, uninit_null().toArray());
+  }
 
   if (RuntimeOption::RepoPreload) {
     Timer timer(Timer::WallTime, "Preloading Repo");
@@ -1333,11 +1339,10 @@ static int execute_program_impl(int argc, char** argv) {
   }
   if (vm.count("version")) {
     cout << "HipHop VM";
-    cout << " " << k_HHVM_VERSION.c_str();
+    cout << " " << HHVM_VERSION;
     cout << " (" << (debug ? "dbg" : "rel") << ")\n";
     cout << "Compiler: " << kCompilerId << "\n";
     cout << "Repo schema: " << kRepoSchemaId << "\n";
-    cout << "Extension API: " << std::to_string(HHVM_API_VERSION) << "\n";
     return 0;
   }
   if (vm.count("compiler-id")) {
@@ -1351,7 +1356,7 @@ static int execute_program_impl(int argc, char** argv) {
   }
 
   if (!po.show.empty()) {
-    SmartPtr<PlainFile> f(newres<PlainFile>());
+    auto f = makeSmartPtr<PlainFile>();
     f->open(po.show, "r");
     if (!f->valid()) {
       Logger::Error("Unable to open file %s", po.show.c_str());
@@ -1580,7 +1585,7 @@ static int execute_program_impl(int argc, char** argv) {
 
   if (po.mode == "daemon" || po.mode == "server") {
     if (!po.user.empty()) RuntimeOption::ServerUser = po.user;
-    return start_server(RuntimeOption::ServerUser);
+    return start_server(RuntimeOption::ServerUser, po.xhprofFlags);
   }
 
   if (po.mode == "replay" && !po.args.empty()) {
@@ -1969,9 +1974,6 @@ void hphp_session_exit() {
 
   {
     ServerStatsHelper ssh("rollback");
-
-    // Clean up pcre state at the end of the request.
-    pcre_session_exit();
 
     hphp_memory_cleanup();
     // Do any post-sweep cleanup necessary for global variables

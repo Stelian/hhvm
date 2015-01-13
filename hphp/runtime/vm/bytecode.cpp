@@ -55,6 +55,8 @@
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/shape.h"
+#include "hphp/runtime/base/struct-array.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/base/apc-typed-value.h"
@@ -1850,7 +1852,7 @@ void ExecutionContext::enterVMAtAsyncFunc(ActRec* enterFnAr,
   vmfp() = enterFnAr;
   vmpc() = vmfp()->func()->unit()->at(resumable->resumeOffset());
   assert(vmfp()->func()->contains(vmpc()));
-  EventHook::FunctionResume(enterFnAr);
+  EventHook::FunctionResumeAwait(enterFnAr);
 
   if (UNLIKELY(exception != nullptr)) {
     assert(exception->instanceof(SystemLib::s_ExceptionClass));
@@ -1910,8 +1912,7 @@ void ExecutionContext::enterVMAtCurPC() {
   Stats::inc(Stats::VMEnter);
 
   if (ThreadInfo::s_threadInfo->m_reqInjectionData.getJit()) {
-    SrcKey sk(vmfp()->func(), vmpc(), vmfp()->resumed());
-    mcg->enterTCAtSrcKey(sk);
+    mcg->enterTC();
   } else {
     dispatch();
   }
@@ -3576,16 +3577,21 @@ OPTBLD_INLINE void ExecutionContext::iopNewPackedArray(IOP_ARGS) {
 OPTBLD_INLINE void ExecutionContext::iopNewStructArray(IOP_ARGS) {
   NEXT();
   DECODE(uint32_t, n); // number of keys and elements
-  assert(n > 0 && n <= MixedArray::MaxMakeSize);
-  StringData* names[MixedArray::MaxMakeSize];
+  assert(n > 0 && n <= StructArray::MaxMakeSize);
+  StringData* names[n];
   for (size_t i = 0; i < n; i++) {
     DECODE_LITSTR(s);
     names[i] = s;
   }
   // This constructor moves values, no inc/decref is necessary.
-  auto* a = MixedArray::MakeStruct(n, names, vmStack().topC());
+  ArrayData* a;
+  if (auto shape = Shape::create(names, n)) {
+    a = MixedArray::MakeStructArray(n, vmStack().topC(), shape);
+  } else {
+    a = MixedArray::MakeStruct(n, names, vmStack().topC())->asArrayData();
+  }
   vmStack().ndiscard(n);
-  vmStack().pushArrayNoRc(a->asArrayData());
+  vmStack().pushArrayNoRc(a);
 }
 
 OPTBLD_INLINE void ExecutionContext::iopAddElemC(IOP_ARGS) {
@@ -5312,8 +5318,7 @@ OPTBLD_INLINE void ExecutionContext::iopIncDecM(IOP_ARGS) {
       case MPC:
       case MPT: {
         Class* ctx = arGetContextClass(vmfp());
-        IncDecProp<true>(tvScratch, *tvRef.asTypedValue(), ctx, op, base,
-                         *curMember, to);
+        IncDecProp<true>(ctx, op, base, *curMember, to);
         break;
       }
       default: assert(false);
@@ -6963,7 +6968,7 @@ OPTBLD_INLINE void ExecutionContext::contEnterImpl(IOP_ARGS) {
   assert(genAR->func()->contains(gen->resumable()->resumeOffset()));
   pc = genAR->func()->unit()->at(gen->resumable()->resumeOffset());
   SYNC();
-  EventHook::FunctionResume(vmfp());
+  EventHook::FunctionResumeYield(vmfp());
 }
 
 OPTBLD_INLINE void ExecutionContext::iopContEnter(IOP_ARGS) {

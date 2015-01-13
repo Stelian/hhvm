@@ -39,11 +39,11 @@ let builtins = "<?hh // decl\n"^
   "  public function getWaitHandle(): WaitHandle<T>;"^
   "}\n"^
   "interface WaitHandle<T> extends Awaitable<T> {}\n"^
-  "interface ConstVector<Tv> extends KeyedIterable<int, Tv>, Indexish<int, Tv>{"^
+  "interface ConstVector<+Tv> extends KeyedIterable<int, Tv>, Indexish<int, Tv>{"^
   "  public function map<Tu>((function(Tv): Tu) $callback): ConstVector<Tu>;"^
   "}\n"^
-  "interface ConstSet<Tv> extends KeyedIterable<mixed, Tv>, Container<Tv>{}\n"^
-  "interface ConstMap<Tk, Tv> extends KeyedIterable<Tk, Tv>, Indexish<Tk, Tv>{"^
+  "interface ConstSet<+Tv> extends KeyedIterable<mixed, Tv>, Container<Tv>{}\n"^
+  "interface ConstMap<Tk, +Tv> extends KeyedIterable<Tk, Tv>, Indexish<Tk, Tv>{"^
   "  public function map<Tu>((function(Tv): Tu) $callback): ConstMap<Tk, Tu>;"^
   "  public function mapWithKey<Tu>((function(Tk, Tv): Tu) $fn): ConstMap<Tk, Tu>;"^
   "}\n"^
@@ -151,7 +151,7 @@ let parse_options () =
     rest = !rest_options;
   }
 
-let suggest_and_print fn funs classes typedefs consts =
+let suggest_and_print fn { FileInfo.funs; classes; typedefs; consts; _ } =
   let make_set =
     List.fold_left (fun acc (_, x) -> SSet.add x acc) SSet.empty in
   let n_funs = make_set funs in
@@ -229,19 +229,16 @@ let replace_color input =
 
 let print_colored fn type_acc =
   let content = cat (Relative_path.to_absolute fn) in
-  let pos_level_l = mk_level_list (Some fn) type_acc in
-  let raw_level_l =
-    rev_rev_map (fun (p, cl) -> Pos.info_raw p, cl) pos_level_l in
-  let results = ColorFile.go content raw_level_l in
+  let results = ColorFile.go content type_acc in
   if Unix.isatty Unix.stdout
   then Tty.print (ClientColorFile.replace_colors results)
   else print_string (List.map replace_color results |> String.concat "")
 
 let print_coverage fn type_acc =
   let counts = ServerCoverageMetric.count_exprs fn type_acc in
-  ClientCoverageMetric.go false (Some (Leaf counts))
+  ClientCoverageMetric.go ~json:false (Some (Leaf counts))
 
-let print_prolog funs classes typedefs consts =
+let print_prolog { FileInfo.funs; classes; typedefs; consts; _ } =
   let facts = Prolog.facts_of_defs [] funs classes typedefs consts in
   PrologMain.output_facts stdout facts
 
@@ -259,13 +256,14 @@ let main_hack { filename; suggest; color; coverage; prolog; _ } =
   ignore (Sys.signal Sys.sigusr1 (Sys.Signal_handle Typing.debug_print_last_pos));
   SharedMem.init();
   Hhi.set_hhi_root_for_unit_test (Path.mk_path "/tmp/hhi");
-  let errors, () =
+  let builtins_filename =
+    Relative_path.create Relative_path.Dummy builtins_filename in
+  let filename = Relative_path.create Relative_path.Dummy filename in
+  let errors, fileinfo =
     Errors.do_ begin fun () ->
-      let file = Relative_path.create Relative_path.Dummy builtins_filename in
       let {Parser_hack.is_hh_file; comments; ast = ast_builtins} =
-        Parser_hack.program file builtins
+        Parser_hack.program builtins_filename builtins
       in
-      let filename = Relative_path.create Relative_path.Dummy filename in
       let ast_file = parse_file filename in
       let ast = ast_builtins @ ast_file in
       Parser_heap.ParserHeap.add filename ast;
@@ -275,32 +273,23 @@ let main_hack { filename; suggest; color; coverage; prolog; _ } =
         SMap.add cname (Relative_path.Set.singleton filename) acc
       end classes SMap.empty in
       Typing_decl.make_env nenv all_classes filename;
-      let check () =
-        List.iter (fun (_, fname) ->
-          Typing_check_service.type_fun fname) funs;
-        List.iter (fun (_, cname) ->
-          Typing_check_service.type_class cname) classes;
-        List.iter (fun (_, x) ->
-          Typing_check_service.check_typedef x) typedefs;
-      in
-      if color || coverage then begin
-        let type_acc = ref [] in
-        Typing.with_expr_hook (fun e ty ->
-          type_acc := (fst e, ty) :: !type_acc) check;
-        if color
-        then print_colored filename !type_acc;
-        if coverage
-        then print_coverage filename !type_acc;
-      end else begin
-        check ();
-        if prolog
-        then print_prolog funs classes typedefs consts;
-        if suggest
-        then suggest_and_print filename funs classes typedefs consts
-      end
-    end
-  in
-  if not prolog then begin
+      { FileInfo.
+        funs; classes; typedefs; consts; comments;
+        consider_names_just_for_autoload = false }
+    end in
+  if color then
+    let result = ServerColorFile.get_level_list
+      (fun () -> ignore (ServerIdeUtils.check_defs fileinfo); filename) in
+    print_colored filename result;
+  else if coverage then
+    let type_acc = ServerCoverageMetric.accumulate_types fileinfo in
+    print_coverage filename type_acc;
+  else if prolog then
+    print_prolog fileinfo
+  else begin
+    let errors = errors @ ServerIdeUtils.check_defs fileinfo in
+    if suggest
+    then suggest_and_print filename fileinfo;
     if errors <> []
     then error (List.hd errors)
     else Printf.printf "No errors\n"

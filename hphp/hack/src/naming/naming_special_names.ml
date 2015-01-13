@@ -60,10 +60,8 @@ module Collections = struct
   let cIndexish         = "\\Indexish"
 
   let cCollection       = "\\Collection"
-  let cConstCollection  = "\\ConstCollection"
   let cConstVector      = "\\ConstVector"
   let cConstMap         = "\\ConstMap"
-  let cConstSet         = "\\ConstSet"
 
 end
 
@@ -115,6 +113,8 @@ module PseudoFunctions = struct
   let empty = "\\empty"
   let isset = "\\isset"
   let unset = "\\unset"
+  let exit_ = "\\exit"
+  let die = "\\die"
   let hh_show = "\\hh_show"
 
 end
@@ -183,6 +183,7 @@ module FB = struct
   let cGenReadApi           = "\\GenReadApi"
   let cGenReadIdxApi        = "\\GenReadIdxApi"
 
+  let cPrivacyPolicy        = "\\PrivacyPolicy"
   let cPrivacyPolicyBase    = "\\PrivacyPolicyBase"
   let cDataType             = "\\DataType"
   let cDataTypeImplProvider = "\\DataTypeImplProvider"

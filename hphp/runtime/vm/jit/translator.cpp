@@ -1599,7 +1599,7 @@ static Type flavorToType(FlavorDesc f) {
 
     case CV: return Type::Cell;  // TODO(#3029148) this could be InitCell
     case UV: return Type::Uninit;
-    case VV: return Type::BoxedCell;
+    case VV: return Type::BoxedInitCell;
     case AV: return Type::Cls;
     case RV: case FV: case CVV: case CVUV: return Type::Gen;
   }
@@ -1607,15 +1607,13 @@ static Type flavorToType(FlavorDesc f) {
 }
 
 void translateInstr(HTS& hts, const NormalizedInstruction& ni) {
-  /*
-   * These generate AssertStks, which define new StkPtrs, and we don't allow IR
-   * lowering functions to gen instructions that may throw after defining a new
-   * StkPtrs.  This means right now they must be before we prepare for the next
-   * HHBC opcode (it's fine that they will have a marker on the previous
-   * instruction).
-   *
-   * TODO(#4810319): this will go away once we stop threading StkPtrs around.
-   */
+  irgen::prepareForNextHHBC(
+    hts,
+    &ni,
+    ni.source.offset(),
+    ni.endsRegion && !irgen::isInlining(hts)
+  );
+
   auto pc = reinterpret_cast<const Op*>(ni.pc());
   for (auto i = 0, num = instrNumPops(pc); i < num; ++i) {
     auto const type = flavorToType(instrInputFlavor(pc, i));
@@ -1626,18 +1624,16 @@ void translateInstr(HTS& hts, const NormalizedInstruction& ni) {
     }
   }
 
-  irgen::prepareForNextHHBC(
-    hts,
-    &ni,
-    ni.source.offset(),
-    ni.endsRegion && !irgen::isInlining(hts)
-  );
   FTRACE(1, "\n{:-^60}\n", folly::format("Translating {}: {} with stack:\n{}",
                                          ni.offset(), ni.toString(),
                                          show(hts)));
 
   irgen::ringbuffer(hts, Trace::RBTypeBytecodeStart, ni.source, 2);
   irgen::emitIncStat(hts, Stats::Instr_TC, 1);
+  if (Trace::moduleEnabledRelease(Trace::llvm, 1) ||
+      RuntimeOption::EvalJitLLVMCounters) {
+    irgen::gen(hts, CountBytecode);
+  }
 
   if (RuntimeOption::EvalHHIRGenerateAsserts >= 2) {
     irgen::gen(hts, DbgAssertRetAddr);

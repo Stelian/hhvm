@@ -86,6 +86,7 @@ retry:
     case ArrayData::kMixedKind:
     case ArrayData::kIntMapKind:
     case ArrayData::kStrMapKind:
+    case ArrayData::kStructKind:
       return FromMixedArray(MixedArray::asMixed(ad));
 
     case ArrayData::kProxyKind:
@@ -273,7 +274,7 @@ void c_AwaitAllWaitHandle::initialize() {
   assert(m_cur >= 0);
 
   if (UNLIKELY(AsioSession::Get()->hasOnAwaitAllCreateCallback())) {
-    SmartPtr<c_Vector> vector(newobj<c_Vector>());
+    auto vector = makeSmartPtr<c_Vector>();
     for (int32_t idx = m_cur; idx >= 0; --idx) {
       TypedValue child = make_tv<KindOfObject>(m_children[idx]);
       vector->add(&child);

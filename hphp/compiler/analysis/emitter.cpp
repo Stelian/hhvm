@@ -106,6 +106,7 @@
 #include "hphp/runtime/vm/as.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/static-string-table.h"
+#include "hphp/runtime/base/struct-array.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/zend-functions.h"
@@ -1363,8 +1364,7 @@ void EmitterVisitor::emitJump(Emitter& e, IterVec& iters, Label& target) {
   }
 }
 
-void EmitterVisitor::emitReturn(Emitter& e, char sym, bool hasConstraint,
-                                StatementPtr s) {
+void EmitterVisitor::emitReturn(Emitter& e, char sym, StatementPtr s) {
   Region* region = m_regions.back().get();
   registerReturn(s, region, sym);
   assert(getEvalStack().size() == 1);
@@ -1376,7 +1376,7 @@ void EmitterVisitor::emitReturn(Emitter& e, char sym, bool hasConstraint,
       // At the top of the hierarchy, no more finally blocks to run.
       // Check return type, free pending iterators and actually return.
       if (sym == StackSym::C) {
-        if (hasConstraint) {
+        if (shouldEmitVerifyRetType()) {
           e.VerifyRetTypeC();
         }
         // IterFree must come after VerifyRetType, because VerifyRetType may
@@ -1385,7 +1385,7 @@ void EmitterVisitor::emitReturn(Emitter& e, char sym, bool hasConstraint,
         e.RetC();
       } else {
         assert(sym == StackSym::V);
-        if (hasConstraint) {
+        if (shouldEmitVerifyRetType()) {
           e.VerifyRetTypeV();
         }
         emitIterFree(e, iters);
@@ -1614,11 +1614,6 @@ void EmitterVisitor::emitReturnTrampoline(Emitter& e,
   auto& t = region->m_returnTargets[sym].target;
   cases[t->m_state]->set(e);
 
-  bool hasConstraint = m_curFunc->retTypeConstraint.hasConstraint();
-  if (m_curFunc->isGenerator) {
-    // Suppress return type checking for generators
-    hasConstraint = false;
-  }
   IterVec iters;
   // We are emitting a case in a finally epilogue, therefore skip
   // the current try region and start from its parent
@@ -1636,14 +1631,14 @@ void EmitterVisitor::emitReturnTrampoline(Emitter& e,
       emitVirtualLocal(retLocal);
       if (sym == StackSym::C) {
         e.CGetL(retLocal);
-        if (hasConstraint) {
+        if (shouldEmitVerifyRetType()) {
           e.VerifyRetTypeC();
         }
         e.RetC();
       } else {
         assert(sym == StackSym::V);
         e.VGetL(retLocal);
-        if (hasConstraint) {
+        if (shouldEmitVerifyRetType()) {
           e.VerifyRetTypeV();
         }
         e.RetV();
@@ -1786,6 +1781,11 @@ void EmitterVisitor::emitContinueTrampoline(Emitter& e, Region* region,
     }
     --depth;
   }
+}
+
+bool EmitterVisitor::shouldEmitVerifyRetType() {
+  return (m_curFunc->retTypeConstraint.hasConstraint() &&
+          !m_curFunc->isGenerator);
 }
 
 int Region::getMaxBreakContinueDepth() {
@@ -2675,7 +2675,7 @@ void EmitterVisitor::visitKids(ConstructPtr c) {
   }
 }
 
-template<class Fun>
+template<typename ArrayType, class Fun>
 bool checkKeys(ExpressionPtr init_expr, bool check_size, Fun fun) {
   if (init_expr->getKindOf() != Expression::KindOfExpressionList) {
     return false;
@@ -2683,7 +2683,7 @@ bool checkKeys(ExpressionPtr init_expr, bool check_size, Fun fun) {
 
   auto el = static_pointer_cast<ExpressionList>(init_expr);
   int n = el->getCount();
-  if (n < 1 || (check_size && n > MixedArray::MaxMakeSize)) {
+  if (n < 1 || (check_size && n > ArrayType::MaxMakeSize)) {
     return false;
   }
 
@@ -2710,32 +2710,33 @@ bool checkKeys(ExpressionPtr init_expr, bool check_size, Fun fun) {
 bool isPackedInit(ExpressionPtr init_expr, int* size,
                   bool check_size = true) {
   *size = 0;
-  return checkKeys(init_expr, check_size, [&](ArrayPairExpressionPtr ap) {
-    Variant key;
+  return checkKeys<MixedArray>(init_expr, check_size,
+    [&](ArrayPairExpressionPtr ap) {
+      Variant key;
 
-    // If we have a key...
-    if (ap->getName() != nullptr) {
-      // ...and it has no scalar value, bail.
-      if (!ap->getScalarValue(key)) return false;
+      // If we have a key...
+      if (ap->getName() != nullptr) {
+        // ...and it has no scalar value, bail.
+        if (!ap->getScalarValue(key)) return false;
 
-      if (key.isInteger()) {
-        // If it's an integer key, check if it's the next packed index.
-        if (key.asInt64Val() != *size) return false;
-      } else {
-        // Give up if it's not a string.
-        if (!key.isString()) return false;
+        if (key.isInteger()) {
+          // If it's an integer key, check if it's the next packed index.
+          if (key.asInt64Val() != *size) return false;
+        } else {
+          // Give up if it's not a string.
+          if (!key.isString()) return false;
 
-        int64_t i; double d;
-        auto numtype = key.getStringData()->isNumericWithVal(i, d, false);
+          int64_t i; double d;
+          auto numtype = key.getStringData()->isNumericWithVal(i, d, false);
 
-        // If it's a string of the next packed index,
-        if (numtype != KindOfInt64 || i != *size) return false;
+          // If it's a string of the next packed index,
+          if (numtype != KindOfInt64 || i != *size) return false;
+        }
       }
-    }
 
-    (*size)++;
-    return true;
-  });
+      (*size)++;
+      return true;
+    });
 }
 
 /*
@@ -2743,18 +2744,19 @@ bool isPackedInit(ExpressionPtr init_expr, int* size,
  * all static strings with no duplicates.
  */
 bool isStructInit(ExpressionPtr init_expr, std::vector<std::string>& keys) {
-  return checkKeys(init_expr, true, [&](ArrayPairExpressionPtr ap) {
-    auto key = ap->getName();
-    if (key == nullptr || !key->isLiteralString()) return false;
-    auto name = key->getLiteralString();
-    int64_t ival;
-    double dval;
-    auto kind = is_numeric_string(name.data(), name.size(), &ival, &dval, 0);
-    if (kind != KindOfNull) return false; // don't allow numeric keys
-    if (std::find(keys.begin(), keys.end(), name) != keys.end()) return false;
-    keys.push_back(name);
-    return true;
-  });
+  return checkKeys<StructArray>(init_expr, true,
+    [&](ArrayPairExpressionPtr ap) {
+      auto key = ap->getName();
+      if (key == nullptr || !key->isLiteralString()) return false;
+      auto name = key->getLiteralString();
+      int64_t ival;
+      double dval;
+      auto kind = is_numeric_string(name.data(), name.size(), &ival, &dval, 0);
+      if (kind != KindOfNull) return false; // don't allow numeric keys
+      if (std::find(keys.begin(), keys.end(), name) != keys.end()) return false;
+      keys.push_back(name);
+      return true;
+    });
 }
 
 bool EmitterVisitor::visit(ConstructPtr node) {
@@ -3000,14 +3002,7 @@ bool EmitterVisitor::visit(ConstructPtr node) {
         assert(m_evalStack.size() == 1);
         assert(IMPLIES(m_curFunc->isAsync || m_curFunc->isGenerator,
                        retSym == StackSym::C));
-
-        bool hasConstraint = m_curFunc->retTypeConstraint.hasConstraint();
-        if (m_curFunc->isGenerator) {
-          // Suppress return type checking for generators
-          hasConstraint = false;
-        }
-
-        emitReturn(e, retSym, hasConstraint, r);
+        emitReturn(e, retSym, r);
         return false;
       }
 
@@ -6812,6 +6807,9 @@ void EmitterVisitor::emitMethod(MethodStatementPtr meth) {
     loc->char0 = loc->char1-1;
     e.setTempLocation(loc);
     e.Null();
+    if (shouldEmitVerifyRetType()) {
+      e.VerifyRetTypeC();
+    }
     e.RetC();
     e.setTempLocation(LocationPtr());
   }
